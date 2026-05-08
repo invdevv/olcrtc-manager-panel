@@ -17,11 +17,10 @@ func TestSubscriptionUsesDocumentedPayloadKeys(t *testing.T) {
 		Port: 8888,
 		Locations: []Location{
 			{
-				StorageID: "amsterdam-wb-vp8",
-				Name:      "Netherlands",
-				ClientID:  "user",
-				Endpoint:  Endpoint{RoomID: "room-01", Key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-				Carrier:   "wbstream",
+				Name:     "Netherlands",
+				ClientID: "user",
+				Endpoint: Endpoint{RoomID: "room-01", Key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+				Carrier:  "wbstream",
 				Transport: Transport{
 					Type: "vp8channel",
 					Payload: map[string]string{
@@ -52,10 +51,9 @@ func TestSubscriptionUsesDocumentedPayloadKeys(t *testing.T) {
 
 func TestServerArgsMapPayloadToCLIFlags(t *testing.T) {
 	loc := Location{
-		StorageID: "loc",
-		ClientID:  "user",
-		Endpoint:  Endpoint{RoomID: "room-01", Key: "key"},
-		Carrier:   "jazz",
+		ClientID: "user",
+		Endpoint: Endpoint{RoomID: "room-01", Key: "key"},
+		Carrier:  "jazz",
 		Transport: Transport{
 			Type: "seichannel",
 			Payload: map[string]string{
@@ -89,8 +87,8 @@ func TestServerArgsMapPayloadToCLIFlags(t *testing.T) {
 }
 
 func TestSubscriptionForClientIncludesOnlyClientLocations(t *testing.T) {
-	userLoc := testLocation("user-loc", "room-01", "Netherlands")
-	otherLoc := testLocation("other-loc", "room-02", "Germany")
+	userLoc := testLocation("room-01", "Netherlands")
+	otherLoc := testLocation("room-02", "Germany")
 	otherLoc.ClientID = "other"
 	cfg := testConfig(userLoc, otherLoc)
 
@@ -107,7 +105,7 @@ func TestSubscriptionForClientIncludesOnlyClientLocations(t *testing.T) {
 }
 
 func TestSubscriptionForClientRejectsUnknownClient(t *testing.T) {
-	cfg := testConfig(testLocation("user-loc", "room-01", "Netherlands"))
+	cfg := testConfig(testLocation("room-01", "Netherlands"))
 
 	if got, ok := subscriptionForClient(cfg, "missing", time.Unix(1778011200, 0)); ok || got != "" {
 		t.Fatalf("subscriptionForClient = %q, %v; want empty, false", got, ok)
@@ -118,7 +116,7 @@ func TestSubscriptionHandlerServesClientPath(t *testing.T) {
 	supervisor := NewSupervisor("olcrtc", func(ctx context.Context, path string, loc Location) (process, error) {
 		return process{location: loc}, nil
 	})
-	loc := testLocation("user-loc", "room-01", "Netherlands")
+	loc := testLocation("room-01", "Netherlands")
 	if err := supervisor.StartAll(context.Background(), testConfig(loc)); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +137,7 @@ func TestSubscriptionHandlerRejectsRootAndUnknownClient(t *testing.T) {
 	supervisor := NewSupervisor("olcrtc", func(ctx context.Context, path string, loc Location) (process, error) {
 		return process{location: loc}, nil
 	})
-	if err := supervisor.StartAll(context.Background(), testConfig(testLocation("user-loc", "room-01", "Netherlands"))); err != nil {
+	if err := supervisor.StartAll(context.Background(), testConfig(testLocation("room-01", "Netherlands"))); err != nil {
 		t.Fatal(err)
 	}
 
@@ -159,7 +157,6 @@ func TestConfigRejectsAnyRoomID(t *testing.T) {
 		Port: 8888,
 		Locations: []Location{
 			{
-				StorageID: "loc",
 				ClientID:  "user",
 				Endpoint:  Endpoint{RoomID: "any", Key: "key"},
 				Carrier:   "wbstream",
@@ -183,7 +180,6 @@ func TestTransportUnmarshalPayload(t *testing.T) {
 		"name": "ScumVPN",
 		"port": 8888,
 		"locations": [{
-			"storage_id": "loc",
 			"name": "Netherlands",
 			"client-id": "user",
 			"endpoint": {"room_id": "room-01", "key": "key"},
@@ -261,20 +257,17 @@ func TestConfigUnmarshalClientsFormat(t *testing.T) {
 	if got := cfg.Locations[0].ClientID; got != "mark" {
 		t.Fatalf("client-id = %q, want mark", got)
 	}
-	if got := cfg.Locations[1].StorageID; got != "mark:room-02:vp8channel" {
-		t.Fatalf("storage_id = %q, want mark:room-02:vp8channel", got)
-	}
 	if got := cfg.Locations[1].Transport.Payload["vp8-fps"]; got != "60" {
 		t.Fatalf("vp8-fps = %q, want 60", got)
 	}
 }
 
 func TestSupervisorReloadStartsAddedLocationAndUpdatesSubscription(t *testing.T) {
-	loc1 := testLocation("loc-1", "room-01", "Netherlands")
-	loc2 := testLocation("loc-2", "room-02", "Germany")
+	loc1 := testLocation("room-01", "Netherlands")
+	loc2 := testLocation("room-02", "Germany")
 	started := make([]string, 0)
 	supervisor := NewSupervisor("olcrtc", func(ctx context.Context, path string, loc Location) (process, error) {
-		started = append(started, loc.StorageID)
+		started = append(started, locationKey(loc))
 		return process{location: loc}, nil
 	})
 
@@ -285,8 +278,8 @@ func TestSupervisorReloadStartsAddedLocationAndUpdatesSubscription(t *testing.T)
 		t.Fatal(err)
 	}
 
-	if got := strings.Join(started, ","); got != "loc-1,loc-2" {
-		t.Fatalf("started = %q, want loc-1,loc-2", got)
+	if got := strings.Join(started, ","); got != "user:room-01:datachannel,user:room-02:datachannel" {
+		t.Fatalf("started = %q, want user:room-01:datachannel,user:room-02:datachannel", got)
 	}
 	if got := supervisor.Subscription(time.Unix(1778011200, 0)); !strings.Contains(got, "$Germany") {
 		t.Fatalf("subscription was not updated:\n%s", got)
@@ -294,7 +287,7 @@ func TestSupervisorReloadStartsAddedLocationAndUpdatesSubscription(t *testing.T)
 }
 
 func TestSupervisorReloadRestartsChangedLocation(t *testing.T) {
-	loc := testLocation("loc-1", "room-01", "Netherlands")
+	loc := testLocation("room-01", "Netherlands")
 	changed := loc
 	changed.Endpoint.RoomID = "room-02"
 	started := make([]string, 0)
@@ -319,11 +312,11 @@ func TestSupervisorReloadRestartsChangedLocation(t *testing.T) {
 }
 
 func TestSupervisorReloadFailureKeepsCurrentConfig(t *testing.T) {
-	loc1 := testLocation("loc-1", "room-01", "Netherlands")
-	loc2 := testLocation("loc-2", "room-02", "Germany")
+	loc1 := testLocation("room-01", "Netherlands")
+	loc2 := testLocation("room-02", "Germany")
 	startErr := errors.New("boom")
 	supervisor := NewSupervisor("olcrtc", func(ctx context.Context, path string, loc Location) (process, error) {
-		if loc.StorageID == "loc-2" {
+		if loc.Endpoint.RoomID == "room-02" {
 			return process{}, startErr
 		}
 		return process{location: loc}, nil
@@ -349,9 +342,8 @@ func testConfig(locations ...Location) Config {
 	}
 }
 
-func testLocation(storageID, roomID, name string) Location {
+func testLocation(roomID, name string) Location {
 	return Location{
-		StorageID: storageID,
 		Name:      name,
 		ClientID:  "user",
 		Endpoint:  Endpoint{RoomID: roomID, Key: "key"},

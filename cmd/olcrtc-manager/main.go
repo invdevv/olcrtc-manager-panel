@@ -50,7 +50,6 @@ type Client struct {
 }
 
 type Location struct {
-	StorageID string    `json:"storage_id"`
 	Name      string    `json:"name"`
 	ClientID  string    `json:"client-id"`
 	Endpoint  Endpoint  `json:"endpoint"`
@@ -265,7 +264,7 @@ func (s *Supervisor) StartAll(ctx context.Context, cfg Config) error {
 			s.processes = make(map[string]process)
 			return err
 		}
-		s.processes[loc.StorageID] = p
+		s.processes[locationKey(loc)] = p
 	}
 	s.cfg = cfg
 	return nil
@@ -276,12 +275,12 @@ func (s *Supervisor) Reload(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	next := locationsByID(cfg.Locations)
+	next := locationsByKey(cfg.Locations)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	current := locationsByID(s.cfg.Locations)
+	current := locationsByKey(s.cfg.Locations)
 	started := make(map[string]process)
 
 	for id, nextLoc := range next {
@@ -340,12 +339,12 @@ func (s *Supervisor) stopLocked(id string) {
 	delete(s.processes, id)
 }
 
-func locationsByID(locations []Location) map[string]Location {
-	byID := make(map[string]Location, len(locations))
+func locationsByKey(locations []Location) map[string]Location {
+	byKey := make(map[string]Location, len(locations))
 	for _, loc := range locations {
-		byID[loc.StorageID] = loc
+		byKey[locationKey(loc)] = loc
 	}
-	return byID
+	return byKey
 }
 
 func stopProcessMap(processes map[string]process) {
@@ -361,15 +360,15 @@ func startInstance(ctx context.Context, olcrtcPath string, loc Location) (proces
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		return process{}, fmt.Errorf("start olcrtc for %s: %w", loc.StorageID, err)
+		return process{}, fmt.Errorf("start olcrtc for %s: %w", locationKey(loc), err)
 	}
 
 	p := process{location: loc, cmd: cmd}
-	log.Printf("started olcrtc for %s: %s %s", loc.StorageID, olcrtcPath, strings.Join(args, " "))
+	log.Printf("started olcrtc for %s: %s %s", locationKey(loc), olcrtcPath, strings.Join(args, " "))
 
 	go func() {
 		if err := cmd.Wait(); err != nil && ctx.Err() == nil {
-			log.Printf("olcrtc for %s exited: %v", loc.StorageID, err)
+			log.Printf("olcrtc for %s exited: %v", locationKey(loc), err)
 		}
 	}()
 
@@ -431,9 +430,6 @@ func (c *Config) Normalize() {
 	}
 
 	if len(c.Clients) == 0 {
-		for i := range c.Locations {
-			c.Locations[i].normalizeStorageID()
-		}
 		return
 	}
 
@@ -443,20 +439,10 @@ func (c *Config) Normalize() {
 			if loc.ClientID == "" {
 				loc.ClientID = client.ClientID
 			}
-			loc.normalizeStorageID()
 			locations = append(locations, loc)
 		}
 	}
 	c.Locations = locations
-}
-
-func (loc *Location) normalizeStorageID() {
-	if loc.StorageID != "" {
-		return
-	}
-
-	parts := []string{loc.ClientID, loc.Endpoint.RoomID, loc.Transport.Type}
-	loc.StorageID = strings.Join(parts, ":")
 }
 
 func (c Config) Validate() error {
@@ -470,14 +456,6 @@ func (c Config) Validate() error {
 	ids := make(map[string]struct{}, len(c.Locations))
 	for i, loc := range c.Locations {
 		prefix := fmt.Sprintf("locations[%d]", i)
-		if loc.StorageID == "" {
-			return fmt.Errorf("%s.storage_id is required", prefix)
-		}
-		if _, exists := ids[loc.StorageID]; exists {
-			return fmt.Errorf("%s.storage_id %q is duplicated", prefix, loc.StorageID)
-		}
-		ids[loc.StorageID] = struct{}{}
-
 		if loc.ClientID == "" {
 			return fmt.Errorf("%s.client-id is required", prefix)
 		}
@@ -493,6 +471,11 @@ func (c Config) Validate() error {
 		if loc.Transport.Type == "" {
 			return fmt.Errorf("%s.transport.type is required", prefix)
 		}
+		key := locationKey(loc)
+		if _, exists := ids[key]; exists {
+			return fmt.Errorf("%s location key %q is duplicated", prefix, key)
+		}
+		ids[key] = struct{}{}
 		if !isSupported(loc.Carrier, loc.Transport.Type) {
 			return fmt.Errorf("%s: unsupported carrier/transport combination %s + %s", prefix, loc.Carrier, loc.Transport.Type)
 		}
@@ -510,6 +493,10 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func locationKey(loc Location) string {
+	return strings.Join([]string{loc.ClientID, loc.Endpoint.RoomID, loc.Transport.Type}, ":")
 }
 
 func isSupported(carrier, transport string) bool {

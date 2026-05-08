@@ -28,7 +28,6 @@
   "active_location_id": "amsterdam-wb-dc",
   "locations": [
     {
-      "storage_id": "amsterdam-wb-dc",
       "name": "Netherlands🇳🇱  ",
       "client-id": "user",
       "endpoint": {
@@ -44,7 +43,6 @@
       "dns": "1.1.1.1:53"
     },
     {
-      "storage_id": "amsterdam-wb-vp8",
       "name": "Netherlands🇳🇱  ",
       "client-id": "user",
       "endpoint": {

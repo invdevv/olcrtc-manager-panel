@@ -24,7 +24,21 @@ You can also reload over HTTP from the same host:
 curl -X POST http://127.0.0.1:8888/-/reload
 ```
 
-Reload compares locations by `storage_id` when present, otherwise by `client-id`, `endpoint.room_id`, and `transport.type`. New locations are started, removed locations are stopped, and changed locations are restarted. The listen port cannot be changed by reload; restart the manager for that.
+Reload compares locations by `client-id`, `endpoint.room_id`, and `transport.type`. New locations are started, removed locations are stopped, and changed locations are restarted. The listen port cannot be changed by reload; restart the manager for that.
+
+## User scripts
+
+Small helper scripts are available in `scripts/` for editing the JSON config. They use `python3` for safe JSON updates:
+
+```sh
+scripts/add-user.sh /etc/olcrtc-manager/config.json alice --from user
+scripts/modify-user.sh /etc/olcrtc-manager/config.json alice --location-name Germany --room-prefix alice-room
+scripts/delete-user.sh /etc/olcrtc-manager/config.json alice
+```
+
+Pass `--reload http://127.0.0.1:8888/-/reload` to any script to reload the running manager after saving the config.
+`add-user.sh` generates endpoint keys with `openssl rand -hex 32`, including for locations copied with `--from`.
+When `--room` is not provided, it generates room ids with `$OLCRTC_PATH -mode gen -carrier ... -dns ... -amount 1`.
 
 ## systemd
 
