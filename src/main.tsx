@@ -722,7 +722,6 @@ function App() {
     }, "Пароль изменен, войди заново");
 
   const openLogs = async (clientID: string, location: LocationState) => {
-    setLogTarget({ clientID, location });
     setLogs([]);
     setNotice("");
     try {
@@ -733,8 +732,10 @@ function App() {
         { cache: "no-store" },
       );
       const body = (await res.json()) as { logs: LogLine[] };
-      setLogs(body.logs);
+      setLogs(body.logs ?? []);
+      setLogTarget({ clientID, location });
     } catch (err) {
+      setLogTarget(null);
       setNotice(err instanceof Error ? err.message : String(err));
     }
   };

@@ -680,30 +680,40 @@ func (s *Supervisor) Restart(ctx context.Context, clientID, roomID, transport st
 	key := strings.Join([]string{strings.TrimSpace(clientID), strings.TrimSpace(roomID), strings.TrimSpace(transport)}, ":")
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	p, ok := s.processes[key]
 	if !ok {
 		loc, found := s.locationLocked(key)
 		if !found {
+			s.mu.Unlock()
 			return fmt.Errorf("location %q not found", key)
 		}
 		quota := s.clientQuotaLocked(loc.ClientID)
 		if quotaStatus(quota, time.Now()) != "active" {
+			s.mu.Unlock()
 			return fmt.Errorf("location %q is blocked by quota status %s", key, quotaStatus(quota, time.Now()))
 		}
-		next, err := s.start(ctx, s.olcrtcPath, loc)
+		next, err := s.start(context.Background(), s.olcrtcPath, loc)
 		if err != nil {
+			s.mu.Unlock()
 			return err
 		}
 		s.registerQuotaLocked(loc, quota, next)
 		s.processes[key] = next
 		s.monitorProcess(ctx, key, next)
+		s.mu.Unlock()
 		return nil
 	}
 	loc := p.location
 	s.stopLocked(key)
-	next, err := s.start(ctx, s.olcrtcPath, loc)
+	s.mu.Unlock()
+
+	if err := waitProcessStopped(ctx, p, 5*time.Second); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next, err := s.start(context.Background(), s.olcrtcPath, loc)
 	if err != nil {
 		return err
 	}
@@ -1632,8 +1642,36 @@ func (q *QuotaEnforcer) Register(loc Location, quota Quota, p *process) error {
 		iface = p.netns.HostIf
 	}
 
+	if p.netns != nil {
+		last := uint64(0)
+		if iface != "" {
+			if bytes, err := interfaceTXBytes(iface); err == nil {
+				last = bytes
+			}
+		}
+		q.mu.Lock()
+		if existing, ok := q.rules[key]; ok && existing.Iface == iface {
+			last = existing.Last
+		}
+		q.rules[key] = quotaRule{ClientID: loc.ClientID, ClassID: classID, Cgroup: cgroup, Dev: dev, Iface: iface, Last: last}
+		q.mu.Unlock()
+		if quota.SpeedMbps > 0 {
+			if err := applyNetnsSpeed(context.Background(), p.netns, quota.SpeedMbps); err != nil {
+				log.Printf("speed limit unavailable for %s: %v", key, err)
+			}
+		} else {
+			_ = runCmd(context.Background(), "tc", "qdisc", "del", "dev", p.netns.HostIf, "root")
+			_ = runCmd(context.Background(), "ip", "netns", "exec", p.netns.Name, "tc", "qdisc", "del", "dev", p.netns.NsIf, "root")
+		}
+		return nil
+	}
+
 	q.mu.Lock()
-	q.rules[key] = quotaRule{ClientID: loc.ClientID, ClassID: classID, Cgroup: cgroup, Dev: dev, Iface: iface}
+	last := uint64(0)
+	if existing, ok := q.rules[key]; ok {
+		last = existing.Last
+	}
+	q.rules[key] = quotaRule{ClientID: loc.ClientID, ClassID: classID, Cgroup: cgroup, Dev: dev, Iface: iface, Last: last}
 	q.mu.Unlock()
 
 	if err := os.MkdirAll(cgroup, 0o755); err != nil {
@@ -1648,15 +1686,6 @@ func (q *QuotaEnforcer) Register(loc Location, quota Quota, p *process) error {
 	q.deleteRule(context.Background(), "INPUT", classID)
 	if err := q.iptables(context.Background(), "-I", "INPUT", "1", "-m", "cgroup", "--cgroup", quotaClassArg(classID), "-m", "comment", "--comment", "olcrtc-manager"); err != nil {
 		return err
-	}
-	if p.netns != nil {
-		if quota.SpeedMbps > 0 {
-			applyNetnsSpeed(context.Background(), p.netns, quota.SpeedMbps)
-		} else {
-			_ = runCmd(context.Background(), "tc", "qdisc", "del", "dev", p.netns.HostIf, "root")
-			_ = runCmd(context.Background(), "ip", "netns", "exec", p.netns.Name, "tc", "qdisc", "del", "dev", p.netns.NsIf, "root")
-		}
-		return nil
 	}
 	if quota.SpeedMbps > 0 && dev != "" && iface == "" {
 		if err := q.applySpeedLimit(context.Background(), dev, classID, quota.SpeedMbps); err != nil {
@@ -1818,7 +1847,34 @@ func (q *QuotaEnforcer) cleanupStale(ctx context.Context) {
 		_ = q.tc(ctx, "qdisc", "del", "dev", dev, "root")
 		_ = q.tc(ctx, "qdisc", "del", "dev", dev, "ingress")
 	}
+	cleanupManagerNetns(ctx)
 	_ = os.RemoveAll("/sys/fs/cgroup/net_cls,net_prio/olcrtc-manager")
+}
+
+func cleanupManagerNetns(ctx context.Context) {
+	if out, err := exec.CommandContext(ctx, "ip", "netns", "list").Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			name := strings.Fields(line)
+			if len(name) == 0 || !strings.HasPrefix(name[0], "olc-") {
+				continue
+			}
+			_ = runCmd(ctx, "ip", "netns", "del", name[0])
+			_ = os.RemoveAll(filepath.Join("/etc/netns", name[0]))
+		}
+	}
+	if out, err := exec.CommandContext(ctx, "ip", "-o", "link", "show").Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			name := strings.TrimSuffix(fields[1], ":")
+			name = strings.Split(name, "@")[0]
+			if strings.HasPrefix(name, "olh") {
+				_ = runCmd(ctx, "ip", "link", "del", name)
+			}
+		}
+	}
 }
 
 func (q *QuotaEnforcer) firstCgroupRuleLine(ctx context.Context, chain string) (int, bool) {
@@ -2053,6 +2109,23 @@ func stopProcessMap(processes map[string]*process) {
 	}
 }
 
+func waitProcessStopped(ctx context.Context, p *process, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !p.state().Running {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New("timed out waiting for olcrtc to stop")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 type netnsRuntime struct {
 	Name   string
 	HostIf string
@@ -2065,10 +2138,14 @@ type netnsRuntime struct {
 func setupNetns(ctx context.Context, loc Location) (*netnsRuntime, error) {
 	key := locationKey(loc)
 	token := fmt.Sprintf("%08x", quotaClassID(key)&0xffffffff)
+	suffix, err := randomHex(2)
+	if err != nil {
+		return nil, err
+	}
 	ns := &netnsRuntime{
-		Name:   "olc-" + token,
-		HostIf: "olh" + token,
-		NsIf:   "oln" + token,
+		Name:   "olc-" + token + "-" + suffix,
+		HostIf: "olh" + token + suffix,
+		NsIf:   "oln" + token + suffix,
 		Dev:    defaultRouteInterface(ctx),
 	}
 	hostIP, nsIP := netnsIPs(key)
@@ -2123,7 +2200,9 @@ func setupNetns(ctx context.Context, loc Location) (*netnsRuntime, error) {
 
 	quota := quotaForClientConfigPath(loc.ClientID)
 	if quota.SpeedMbps > 0 {
-		applyNetnsSpeed(ctx, ns, quota.SpeedMbps)
+		if err := applyNetnsSpeed(ctx, ns, quota.SpeedMbps); err != nil {
+			log.Printf("speed limit unavailable for %s: %v", locationKey(loc), err)
+		}
 	}
 	return ns, nil
 }
@@ -2175,10 +2254,25 @@ func delNetnsFirewall(ctx context.Context, ns *netnsRuntime) {
 	}
 }
 
-func applyNetnsSpeed(ctx context.Context, ns *netnsRuntime, speedMbps int) {
+func applyNetnsSpeed(ctx context.Context, ns *netnsRuntime, speedMbps int) error {
 	rate := strconv.Itoa(speedMbps) + "mbit"
-	_ = runCmd(ctx, "tc", "qdisc", "replace", "dev", ns.HostIf, "root", "tbf", "rate", rate, "burst", "256kb", "latency", "400ms")
-	_ = runCmd(ctx, "ip", "netns", "exec", ns.Name, "tc", "qdisc", "replace", "dev", ns.NsIf, "root", "tbf", "rate", rate, "burst", "256kb", "latency", "400ms")
+	if err := applyHTBSpeed(ctx, ns.HostIf, rate); err != nil {
+		return err
+	}
+	if err := runCmd(ctx, "ip", "netns", "exec", ns.Name, "tc", "qdisc", "replace", "dev", ns.NsIf, "root", "handle", "1:", "htb", "default", "10"); err != nil {
+		return err
+	}
+	if err := runCmd(ctx, "ip", "netns", "exec", ns.Name, "tc", "class", "replace", "dev", ns.NsIf, "parent", "1:", "classid", "1:10", "htb", "rate", rate, "ceil", rate); err != nil {
+		return err
+	}
+	return nil
+}
+
+func applyHTBSpeed(ctx context.Context, dev, rate string) error {
+	if err := runCmd(ctx, "tc", "qdisc", "replace", "dev", dev, "root", "handle", "1:", "htb", "default", "10"); err != nil {
+		return err
+	}
+	return runCmd(ctx, "tc", "class", "replace", "dev", dev, "parent", "1:", "classid", "1:10", "htb", "rate", rate, "ceil", rate)
 }
 
 func writeNetnsResolv(nsName, dns string) error {
